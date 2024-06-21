@@ -1,7 +1,6 @@
 import os
 from typing import List, Dict, Optional
 import sys
-sys.path.insert(0, '/home/zhongbing/Projects/MLE/table-transformer/detr/infer')
 from PIL import Image
 script_dir = os.path.dirname(os.path.realpath(__file__))
 parent_dir = os.path.dirname(script_dir)
@@ -58,7 +57,9 @@ def consolidate(data, width, height):
 
 
 def inference(path):
-    result = inference_for_table_recognition(path)
+    # to revise the path to your own path, structure_config_path and structure_model_path
+    result = inference_for_table_recognition(path,structure_config_path='/home/zhongbing/Projects/MLE/table-transformer/detr/config/structure_config.json',
+                         structure_model_path='/home/zhongbing/Projects/MLE/table-transformer/detr/models/model_20.pth')
     width, height = get_image_size(path)
     return consolidate(result, width, height)
 
@@ -75,13 +76,16 @@ class NewModel(LabelStudioMLBase):
         # image_url = get_image_url
         # image_path = self.get_local_path(image_url)
         file_name = image_path.split('/')[-1]
+
+        # to revise labelstudio改成你自己的工程路径
         image_path = "/home/zhongbing/Projects/MLE/LabelStudio/media/upload/3/" + file_name
-        print(f'''\
-        Run prediction on {tasks}
-        Received context: {context}
-        Project ID: {self.project_id}
-        Label config: {self.label_config}
-        Parsed JSON Label config: {self.parsed_label_config}''')
+        # print(f'''\
+        # Run prediction on {tasks}
+        # Received context: {context}
+        # Project ID: {self.project_id}
+        # Label config: {self.label_config}
+        # Parsed JSON Label config: {self.parsed_label_config}''')
+        print(f"Run prediction on {self}")
         return inference(image_path)
 
     def fit(self, event, data, **kwargs):

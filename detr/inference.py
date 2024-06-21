@@ -1081,9 +1081,8 @@ def infer_by_file(mode, detection_device, structure_device, detection_config_pat
         return extracted_table['objects']
 
 
-def inference_for_table_recognition(image_dir):
-    return infer_by_file('recognize', 'cpu', 'cpu', structure_config_path='/home/zhongbing/Projects/MLE/table-transformer/detr/config/structure_config.json',
-                         structure_model_path='/home/zhongbing/Projects/MLE/table-transformer/detr/models/model_20.pth',
+def inference_for_table_recognition(image_dir,structure_config_path,structure_model_path):
+    return infer_by_file('recognize', 'cpu', 'cpu', structure_config_path=structure_config_path,structure_model_path=structure_model_path,
                          image_dir=image_dir, out_dir='./output',
                          objects=True, csv=True, html=True, crop_padding=20)
 
