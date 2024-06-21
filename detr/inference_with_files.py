@@ -1,3 +1,4 @@
+import time
 from collections import OrderedDict, defaultdict
 import json
 import argparse
@@ -20,12 +21,14 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.patches import Patch
 
-from main import get_model
-import postprocess
+from pipeline.main import get_model
+from pipeline import postprocess
 
 sys.path.append("../detr")
 from models import build_model
 
+
+# python3 inference.py --mode recognize --structure_config_path ./config/structure_config.json --structure_model_path ./models/TATR-v1.1-All-msft.pth --structure_device cpu --image_dir ./img  --out_dir ./output -o -c -l -m -z -v -p --crop_padding 20
 
 class MaxResize(object):
     def __init__(self, max_size=800):
@@ -464,7 +467,7 @@ def structure_to_cells(table_structure, tokens):
     for cell, cell_span_nums in zip(cells, span_nums_by_cell):
         cell_spans = [tokens[num] for num in cell_span_nums]
         # TODO: Refine how text is extracted; should be character-based, not span-based;
-        # but need to associate 
+        # but need to associate
         cell['cell text'] = postprocess.extract_text_from_spans(cell_spans, remove_integer_superscripts=False)
         cell['spans'] = cell_spans
 
@@ -792,7 +795,7 @@ class TableExtractionPipeline(object):
         if not (out_cells or out_html or out_csv):
             return out_formats
 
-        # Further process the detected objects so they correspond to a consistent table 
+        # Further process the detected objects so they correspond to a consistent table
         tables_structure = objects_to_structures(objects, tokens, self.str_class_thresholds)
 
         # Enumerate all table cells: grid cells and spanning cells
@@ -807,7 +810,7 @@ class TableExtractionPipeline(object):
             tables_htmls = [cells_to_html(cells) for cells in tables_cells]
             out_formats['html'] = tables_htmls
 
-        # Convert cells to CSV, including flattening multi-row column headers to a single row 
+        # Convert cells to CSV, including flattening multi-row column headers to a single row
         if out_csv:
             tables_csvs = [cells_to_csv(cells) for cells in tables_cells]
             out_formats['csv'] = tables_csvs

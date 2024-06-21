@@ -1,3 +1,4 @@
+import time
 from collections import OrderedDict, defaultdict
 import json
 import argparse
@@ -20,8 +21,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.patches import Patch
 
-from main import get_model
-import postprocess
+from pipeline.main import get_model
+from pipeline import postprocess
 
 sys.path.append("../detr")
 from models import build_model
@@ -78,7 +79,7 @@ detection_class_thresholds = {
 structure_class_thresholds = {
     "table": 0.5,
     "table column": 0.5,
-    "table row": 0.5,
+    "table row": 0.95,
     "table column header": 0.5,
     "table projected row header": 0.5,
     "table spanning cell": 0.5,
@@ -857,7 +858,7 @@ def output_result(key, val, args, img, img_file):
                     with open(os.path.join(args.out_dir, out_words_file), 'w') as f:
                         json.dump(cropped_table['tokens'], f)
             elif key == 'cells':
-                out_file = img_file.replace(".jpg", "_{}_objects.json".format(idx))
+                out_file = img_file.replace(".jpg", "_{}_cell.json".format(idx))
                 with open(os.path.join(args.out_dir, out_file), 'w') as f:
                     json.dump(elem, f)
                 if args.verbose:
@@ -874,82 +875,226 @@ def output_result(key, val, args, img, img_file):
                     print(elem)
 
 
-def main():
-    args = get_args()
-    print(args.__dict__)
-    print('-' * 100)
+class ResultOutputter:
+    def __init__(self, out_dir, verbose=False, visualize=False):
+        self.out_dir = out_dir
+        self.verbose = verbose
+        self.visualize = visualize
+        # Ensure the output directory exists
+        if not os.path.exists(self.out_dir):
+            os.makedirs(self.out_dir)
 
-    if not args.out_dir is None and not os.path.exists(args.out_dir):
-        os.makedirs(args.out_dir)
+    def output_objects(self, img_file, objects):
+        # if self.verbose:
+        #     print(objects)
+        out_file = img_file.replace(".jpg", "_objects.json")
+        with open(os.path.join(self.out_dir, out_file), 'w') as f:
+            json.dump(objects, f)
+        if self.visualize:
+            self.visualize_detected_tables(img_file, objects)
+
+    def output_cells(self, img_file, cells):
+        for idx, cell in enumerate(cells):
+            if self.verbose:
+                print(cell)
+            out_file = img_file.replace(".jpg", f"_cell_{idx}.json")
+            with open(os.path.join(self.out_dir, out_file), 'w') as f:
+                json.dump(cell, f)
+            if self.visualize:
+                self.visualize_cells(img_file, cell, idx)
+
+    def output_crops(self, img_file, crops):
+        for idx, crop in enumerate(crops):
+            out_img_file = img_file.replace(".jpg", f"_table_{idx}.jpg")
+            crop['image'].save(os.path.join(self.out_dir, out_img_file))
+            out_words_file = out_img_file.replace(".jpg", "_words.json")
+            with open(os.path.join(self.out_dir, out_words_file), 'w') as f:
+                json.dump(crop['tokens'], f)
+
+    # Visualization methods would go here
+    def visualize_detected_tables(self, img_file, objects):
+        # Implement visualization of detected tables here
+        pass
+
+    def visualize_cells(self, img_file, cell, idx):
+        # Implement visualization of cells here
+        pass
+
+
+# Example usage
+out_dir = "./output"
+outputter = ResultOutputter(out_dir, verbose=True, visualize=True)
+
+# Assuming `objects`, `cells`, and `crops` are the data to be output
+img_file = "example_image.jpg"
+objects = [{'label': 'table', 'bbox': [100, 100, 500, 500], 'score': 0.9}]  # Example data
+cells = [{'bbox': [100, 100, 150, 150], 'text': 'Example Cell 1'},
+         {'bbox': [150, 100, 200, 150], 'text': 'Example Cell 2'}]  # Example data
+crops = [{'image': Image.new('RGB', (100, 100)), 'tokens': []}]  # Example data
+
+outputter.output_objects(img_file, objects)
+outputter.output_cells(img_file, cells)
+outputter.output_crops(img_file, crops)
+
+
+# def main():
+#     args = get_args()
+#     print(args.__dict__)
+#     print('-' * 100)
+#
+#     if not args.out_dir is None and not os.path.exists(args.out_dir):
+#         os.makedirs(args.out_dir)
+#
+#     # Create inference pipeline
+#     print("Creating inference pipeline")
+#     pipe = TableExtractionPipeline(det_device=args.detection_device,
+#                                    str_device=args.structure_device,
+#                                    det_config_path=args.detection_config_path,
+#                                    det_model_path=args.detection_model_path,
+#                                    str_config_path=args.structure_config_path,
+#                                    str_model_path=args.structure_model_path)
+#
+#     # Load images
+#     img_files = os.listdir(args.image_dir)
+#     num_files = len(img_files)
+#     random.shuffle(img_files)
+#
+#     for count, img_file in enumerate(img_files):
+#         print("({}/{})".format(count + 1, num_files))
+#         img_path = os.path.join(args.image_dir, img_file)
+#         img = Image.open(img_path).convert('RGB')
+#         print("Image loaded.")
+#
+#         if not args.words_dir is None:
+#             tokens_path = os.path.join(args.words_dir, img_file.replace(".jpg", "_words.json"))
+#             with open(tokens_path, 'r') as f:
+#                 tokens = json.load(f)
+#
+#                 # Handle dictionary format
+#                 if type(tokens) is dict and 'words' in tokens:
+#                     tokens = tokens['words']
+#
+#                 # 'tokens' is a list of tokens
+#                 # Need to be in a relative reading order
+#                 # If no order is provided, use current order
+#                 for idx, token in enumerate(tokens):
+#                     if not 'span_num' in token:
+#                         token['span_num'] = idx
+#                     if not 'line_num' in token:
+#                         token['line_num'] = 0
+#                     if not 'block_num' in token:
+#                         token['block_num'] = 0
+#         else:
+#             tokens = []
+#
+#         if args.mode == 'recognize':
+#             extracted_table = pipe.recognize(img, tokens, out_objects=args.objects, out_cells=args.csv,
+#                                              out_html=args.html, out_csv=args.csv)
+#             print("Table(s) recognized.")
+#
+#             for key, val in extracted_table.items():
+#                 output_result(key, val, args, img, img_file)
+#
+#         if args.mode == 'detect':
+#             detected_tables = pipe.detect(img, tokens, out_objects=args.objects, out_crops=args.crops)
+#             print("Table(s) detected.")
+#
+#             for key, val in detected_tables.items():
+#                 output_result(key, val, args, img, img_file)
+#
+#         if args.mode == 'extract':
+#             extracted_tables = pipe.extract(img, tokens, out_objects=args.objects, out_cells=args.csv,
+#                                             out_html=args.html, out_csv=args.csv,
+#                                             crop_padding=args.crop_padding)
+#             print("Table(s) extracted.")
+#
+#             for table_idx, extracted_table in enumerate(extracted_tables):
+#                 for key, val in extracted_table.items():
+#                     output_result(key, val, args, extracted_table['image'],
+#                                   img_file.replace('.jpg', '_{}.jpg'.format(table_idx)))
+#
+
+def infer_for_folder(mode, detection_device, structure_device, detection_config_path=None, detection_model_path=None,
+                     structure_config_path=None, structure_model_path=None, image_dir=None, out_dir=None,
+                     words_dir=None,
+                     objects=False, csv=False, html=False, crop_padding=20):
+    if not out_dir is None and not os.path.exists(out_dir):
+        os.makedirs(out_dir)
 
     # Create inference pipeline
     print("Creating inference pipeline")
-    pipe = TableExtractionPipeline(det_device=args.detection_device,
-                                   str_device=args.structure_device,
-                                   det_config_path=args.detection_config_path,
-                                   det_model_path=args.detection_model_path,
-                                   str_config_path=args.structure_config_path,
-                                   str_model_path=args.structure_model_path)
+    pipe = TableExtractionPipeline(det_device=detection_device,
+                                   str_device=structure_device,
+                                   det_config_path=detection_config_path,
+                                   det_model_path=detection_model_path,
+                                   str_config_path=structure_config_path,
+                                   str_model_path=structure_model_path)
 
     # Load images
-    img_files = os.listdir(args.image_dir)
+    img_files = os.listdir(image_dir)
     num_files = len(img_files)
     random.shuffle(img_files)
-
+    parser = ResultOutputter(out_dir, verbose=True, visualize=True)
     for count, img_file in enumerate(img_files):
         print("({}/{})".format(count + 1, num_files))
-        img_path = os.path.join(args.image_dir, img_file)
+        img_path = os.path.join(image_dir, img_file)
         img = Image.open(img_path).convert('RGB')
         print("Image loaded.")
 
-        if not args.words_dir is None:
-            tokens_path = os.path.join(args.words_dir, img_file.replace(".jpg", "_words.json"))
-            with open(tokens_path, 'r') as f:
-                tokens = json.load(f)
+        tokens = []
 
-                # Handle dictionary format
-                if type(tokens) is dict and 'words' in tokens:
-                    tokens = tokens['words']
-
-                # 'tokens' is a list of tokens
-                # Need to be in a relative reading order
-                # If no order is provided, use current order
-                for idx, token in enumerate(tokens):
-                    if not 'span_num' in token:
-                        token['span_num'] = idx
-                    if not 'line_num' in token:
-                        token['line_num'] = 0
-                    if not 'block_num' in token:
-                        token['block_num'] = 0
-        else:
-            tokens = []
-
-        if args.mode == 'recognize':
-            extracted_table = pipe.recognize(img, tokens, out_objects=args.objects, out_cells=args.csv,
-                                             out_html=args.html, out_csv=args.csv)
+        if mode == 'recognize':
+            extracted_table = pipe.recognize(img, tokens, out_objects=objects, out_cells=csv,
+                                             out_html=html, out_csv=csv)
             print("Table(s) recognized.")
+            parser.output_objects(img_file, extracted_table['objects'])
 
-            for key, val in extracted_table.items():
-                output_result(key, val, args, img, img_file)
 
-        if args.mode == 'detect':
-            detected_tables = pipe.detect(img, tokens, out_objects=args.objects, out_crops=args.crops)
-            print("Table(s) detected.")
+def infer_by_file(mode, detection_device, structure_device, detection_config_path=None, detection_model_path=None,
+                  structure_config_path=None, structure_model_path=None, image_dir=None, out_dir=None, words_dir=None,
+                  objects=False, csv=False, html=False, crop_padding=20):
+    if not out_dir is None and not os.path.exists(out_dir):
+        os.makedirs(out_dir)
 
-            for key, val in detected_tables.items():
-                output_result(key, val, args, img, img_file)
+    # Create inference pipeline
+    print("Creating inference pipeline")
+    pipe = TableExtractionPipeline(det_device=detection_device,
+                                   str_device=structure_device,
+                                   det_config_path=detection_config_path,
+                                   det_model_path=detection_model_path,
+                                   str_config_path=structure_config_path,
+                                   str_model_path=structure_model_path)
 
-        if args.mode == 'extract':
-            extracted_tables = pipe.extract(img, tokens, out_objects=args.objects, out_cells=args.csv,
-                                            out_html=args.html, out_csv=args.csv,
-                                            crop_padding=args.crop_padding)
-            print("Table(s) extracted.")
+    # Load images
+    parser = ResultOutputter(out_dir, verbose=True, visualize=True)
 
-            for table_idx, extracted_table in enumerate(extracted_tables):
-                for key, val in extracted_table.items():
-                    output_result(key, val, args, extracted_table['image'],
-                                  img_file.replace('.jpg', '_{}.jpg'.format(table_idx)))
+    img = Image.open(image_dir).convert('RGB')
+    print("Image loaded.")
+
+    tokens = []
+
+    if mode == 'recognize':
+        extracted_table = pipe.recognize(img, tokens, out_objects=objects, out_cells=csv,
+                                         out_html=html, out_csv=csv)
+        print("Table(s) recognized.")
+        # parser.output_objects(img_file, extracted_table['objects'])
+        return extracted_table['objects']
+
+
+def inference_for_table_recognition(image_dir):
+    return infer_by_file('recognize', 'cpu', 'cpu', structure_config_path='/home/zhongbing/Projects/MLE/table-transformer/detr/config/structure_config.json',
+                         structure_model_path='/home/zhongbing/Projects/MLE/table-transformer/detr/models/model_20.pth',
+                         image_dir=image_dir, out_dir='./output',
+                         objects=True, csv=True, html=True, crop_padding=20)
 
 
 if __name__ == "__main__":
-    main()
+    start = time.time()
+    result = infer_by_file('recognize', 'cpu', 'cpu', structure_config_path='/home/zhongbing/Projects/MLE/table-transformer/detr/config/structure_config.json',
+                           structure_model_path='/home/zhongbing/Projects/MLE/table-transformer/detr/models/model_20.pth',
+                           image_dir='/home/zhongbing/Projects/MLE/table-transformer/detr/img/complex.jpg',
+                           out_dir='./output',
+                           objects=True, csv=True, html=True, crop_padding=20)
+    print(result)
+    end = time.time()
+    print(end - start)

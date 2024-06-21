@@ -8,10 +8,20 @@ import sys
 from typing import Iterable
 
 import torch
-
-import util.misc as utils
+sys.path.insert(0, '/home/zhongbing/Projects/MLE/table-transformer/detr')
+from PIL import Image
+script_dir = os.path.dirname(os.path.realpath(__file__))
+parent_dir = os.path.dirname(script_dir)
+sys.path.append(script_dir)
+sys.path.append(parent_dir)
+sys.path.append("./")
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
+
+
+import util.misc as utils
+# from datasets.coco_eval import CocoEvaluator
+# from datasets.panoptic_eval import PanopticEvaluator
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,

@@ -1,116 +1,358 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+import os
 import argparse
-import datetime
 import json
+from datetime import datetime
+import string
+import sys
 import random
-import time
-from pathlib import Path
-
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 
-import datasets
-import util.misc as utils
-from datasets import build_dataset, get_coco_api_from_dataset
+sys.path.append("../detr")
 from engine import evaluate, train_one_epoch
 from models import build_model
+import util.misc as utils
+import datasets.transforms as R
+
+import pipeline.table_datasets as TD
+from pipeline.table_datasets import PDFTablesDataset
+from pipeline.eval import eval_coco
 
 
-def get_args_parser():
-    parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
-    parser.add_argument('--lr', default=1e-4, type=float)
-    parser.add_argument('--lr_backbone', default=1e-5, type=float)
-    parser.add_argument('--batch_size', default=2, type=int)
-    parser.add_argument('--weight_decay', default=1e-4, type=float)
-    parser.add_argument('--epochs', default=300, type=int)
-    parser.add_argument('--lr_drop', default=200, type=int)
-    parser.add_argument('--clip_max_norm', default=0.1, type=float,
-                        help='gradient clipping max norm')
+def get_args():
+    parser = argparse.ArgumentParser()
 
-    # Model parameters
-    parser.add_argument('--frozen_weights', type=str, default=None,
-                        help="Path to the pretrained model. If set, only the mask head will be trained")
-    # * Backbone
-    parser.add_argument('--backbone', default='resnet50', type=str,
-                        help="Name of the convolutional backbone to use")
-    parser.add_argument('--dilation', action='store_true',
-                        help="If true, we replace stride with dilation in the last convolutional block (DC5)")
-    parser.add_argument('--position_embedding', default='sine', type=str, choices=('sine', 'learned'),
-                        help="Type of positional embedding to use on top of the image features")
+    parser.add_argument('--data_root_dir',
+                        required=True,
+                        help="Root data directory for images and labels")
+    parser.add_argument('--config_file',
+                        required=True,
+                        help="Filepath to the config containing the args")
+    parser.add_argument('--backbone',
+                        default='resnet18',
+                        help="Backbone for the model")
+    parser.add_argument(
+        '--data_type',
+        choices=['detection', 'structure'],
+        default='structure',
+        help="toggle between structure recognition and table detection")
+    parser.add_argument('--model_load_path', help="The path to trained model")
+    parser.add_argument('--load_weights_only', action='store_true')
+    parser.add_argument('--model_save_dir', help="The output directory for saving model params and checkpoints")
+    parser.add_argument('--metrics_save_filepath',
+                        help='Filepath to save grits outputs',
+                        default='')
+    parser.add_argument('--debug_save_dir',
+                        help='Filepath to save visualizations',
+                        default='debug')
+    parser.add_argument('--table_words_dir',
+                        help="Folder containg the bboxes of table words")
+    parser.add_argument('--mode',
+                        choices=['train', 'eval'],
+                        default='train',
+                        help="Modes: training (train) and evaluation (eval)")
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--device')
+    parser.add_argument('--lr', type=float)
+    parser.add_argument('--lr_drop', type=int)
+    parser.add_argument('--lr_gamma', type=float)
+    parser.add_argument('--epochs', type=int)
+    parser.add_argument('--checkpoint_freq', default=1, type=int)
+    parser.add_argument('--batch_size', type=int)
+    parser.add_argument('--num_workers', type=int)
+    parser.add_argument('--train_max_size', type=int)
+    parser.add_argument('--val_max_size', type=int)
+    parser.add_argument('--test_max_size', type=int)
+    parser.add_argument('--eval_pool_size', type=int, default=1)
+    parser.add_argument('--eval_step', type=int, default=1)
 
-    # * Transformer
-    parser.add_argument('--enc_layers', default=6, type=int,
-                        help="Number of encoding layers in the transformer")
-    parser.add_argument('--dec_layers', default=6, type=int,
-                        help="Number of decoding layers in the transformer")
-    parser.add_argument('--dim_feedforward', default=2048, type=int,
-                        help="Intermediate size of the feedforward layers in the transformer blocks")
-    parser.add_argument('--hidden_dim', default=256, type=int,
-                        help="Size of the embeddings (dimension of the transformer)")
-    parser.add_argument('--dropout', default=0.1, type=float,
-                        help="Dropout applied in the transformer")
-    parser.add_argument('--nheads', default=8, type=int,
-                        help="Number of attention heads inside the transformer's attentions")
-    parser.add_argument('--num_queries', default=100, type=int,
-                        help="Number of query slots")
-    parser.add_argument('--pre_norm', action='store_true')
-
-    # * Segmentation
-    parser.add_argument('--masks', action='store_true',
-                        help="Train segmentation head if the flag is provided")
-
-    # Loss
-    parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
-                        help="Disables auxiliary decoding losses (loss at each layer)")
-    # * Matcher
-    parser.add_argument('--set_cost_class', default=1, type=float,
-                        help="Class coefficient in the matching cost")
-    parser.add_argument('--set_cost_bbox', default=5, type=float,
-                        help="L1 box coefficient in the matching cost")
-    parser.add_argument('--set_cost_giou', default=2, type=float,
-                        help="giou box coefficient in the matching cost")
-    # * Loss coefficients
-    parser.add_argument('--mask_loss_coef', default=1, type=float)
-    parser.add_argument('--dice_loss_coef', default=1, type=float)
-    parser.add_argument('--bbox_loss_coef', default=5, type=float)
-    parser.add_argument('--giou_loss_coef', default=2, type=float)
-    parser.add_argument('--eos_coef', default=0.1, type=float,
-                        help="Relative classification weight of the no-object class")
-
-    # dataset parameters
-    parser.add_argument('--dataset_file', default='coco')
-    parser.add_argument('--coco_path', type=str)
-    parser.add_argument('--coco_panoptic_path', type=str)
-    parser.add_argument('--remove_difficult', action='store_true')
-
-    parser.add_argument('--output_dir', default='',
-                        help='path where to save, empty for no saving')
-    parser.add_argument('--device', default='cuda',
-                        help='device to use for training / testing')
-    parser.add_argument('--seed', default=42, type=int)
-    parser.add_argument('--resume', default='', help='resume from checkpoint')
-    parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
-                        help='start epoch')
-    parser.add_argument('--eval', action='store_true')
-    parser.add_argument('--num_workers', default=2, type=int)
-
-    # distributed training parameters
-    parser.add_argument('--world_size', default=1, type=int,
-                        help='number of distributed processes')
-    parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
-    return parser
+    return parser.parse_args()
 
 
-def main(args):
-    utils.init_distributed_mode(args)
-    print("git:\n  {}\n".format(utils.get_sha()))
+def get_transform(data_type, image_set):
+    if data_type == 'structure':
+        return TD.get_structure_transform(image_set)
+    else:
+        return TD.get_detection_transform(image_set)
 
-    if args.frozen_weights is not None:
-        assert args.masks, "Frozen training is meant for segmentation only"
-    print(args)
 
-    device = torch.device(args.device)
+def get_class_map(data_type):
+    if data_type == 'structure':
+        class_map = {
+            'table': 0,
+            'table column': 1,
+            'table row': 2,
+            'table column header': 3,
+            'table projected row header': 4,
+            'table spanning cell': 5,
+            'no object': 6
+        }
+    else:
+        class_map = {'table': 0, 'table rotated': 1, 'no object': 2}
+    return class_map
+
+
+def get_data(args):
+    """
+    Based on the args, retrieves the necessary data to perform training, 
+    evaluation or GriTS metric evaluation
+    """
+    # Datasets
+    print("loading data")
+    class_map = get_class_map(args.data_type)
+
+    if args.mode == "train":
+        dataset_train = PDFTablesDataset(
+            os.path.join(args.data_root_dir, "train"),
+            get_transform(args.data_type, "train"),
+            do_crop=False,
+            max_size=args.train_max_size,
+            include_eval=False,
+            max_neg=0,
+            make_coco=False,
+            image_extension=".jpg",
+            xml_fileset="train_filelist.txt",
+            class_map=class_map)
+        dataset_val = PDFTablesDataset(os.path.join(args.data_root_dir, "val"),
+                                       get_transform(args.data_type, "val"),
+                                       do_crop=False,
+                                       max_size=args.val_max_size,
+                                       include_eval=False,
+                                       make_coco=True,
+                                       image_extension=".jpg",
+                                       xml_fileset="val_filelist.txt",
+                                       class_map=class_map)
+
+        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+
+        batch_sampler_train = torch.utils.data.BatchSampler(sampler_train,
+                                                            args.batch_size,
+                                                            drop_last=True)
+
+        data_loader_train = DataLoader(dataset_train,
+                                       batch_sampler=batch_sampler_train,
+                                       collate_fn=utils.collate_fn,
+                                       num_workers=args.num_workers)
+        data_loader_val = DataLoader(dataset_val,
+                                     2 * args.batch_size,
+                                     sampler=sampler_val,
+                                     drop_last=False,
+                                     collate_fn=utils.collate_fn,
+                                     num_workers=args.num_workers)
+        return data_loader_train, data_loader_val, dataset_val, len(
+            dataset_train)
+
+    elif args.mode == "eval":
+
+        dataset_test = PDFTablesDataset(os.path.join(args.data_root_dir,
+                                                     "test"),
+                                        get_transform(args.data_type, "val"),
+                                        do_crop=False,
+                                        max_size=args.test_max_size,
+                                        make_coco=True,
+                                        include_eval=True,
+                                        image_extension=".jpg",
+                                        xml_fileset="test_filelist.txt",
+                                        class_map=class_map)
+        sampler_test = torch.utils.data.SequentialSampler(dataset_test)
+
+        data_loader_test = DataLoader(dataset_test,
+                                      2 * args.batch_size,
+                                      sampler=sampler_test,
+                                      drop_last=False,
+                                      collate_fn=utils.collate_fn,
+                                      num_workers=args.num_workers)
+        return data_loader_test, dataset_test
+
+    elif args.mode == "grits" or args.mode == "grits-all":
+        dataset_test = PDFTablesDataset(os.path.join(args.data_root_dir,
+                                                     "test"),
+                                        RandomMaxResize(1000, 1000),
+                                        include_original=True,
+                                        max_size=args.max_test_size,
+                                        make_coco=False,
+                                        image_extension=".jpg",
+                                        xml_fileset="test_filelist.txt",
+                                        class_map=class_map)
+        return dataset_test
+
+
+def get_model(args, device):
+    """
+    Loads DETR model on to the device specified.
+    If a load path is specified, the state dict is updated accordingly.
+    """
+    model, criterion, postprocessors = build_model(args)
+    model.to(device)
+    if args.model_load_path:
+        print("loading model from checkpoint")
+        loaded_state_dict = torch.load(args.model_load_path,
+                                       map_location=device)
+        model_state_dict = model.state_dict()
+        pretrained_dict = {
+            k: v
+            for k, v in loaded_state_dict.items()
+            if k in model_state_dict and model_state_dict[k].shape == v.shape
+        }
+        model_state_dict.update(pretrained_dict)
+        model.load_state_dict(model_state_dict, strict=True)
+    return model, criterion, postprocessors
+
+
+def train(args, model, criterion, postprocessors, device):
+    """
+    Training loop
+    """
+
+    print("loading data")
+    dataloading_time = datetime.now()
+    data_loader_train, data_loader_val, dataset_val, train_len = get_data(args)
+    print("finished loading data in :", datetime.now() - dataloading_time)
+
+    model_without_ddp = model
+    param_dicts = [
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if "backbone" not in n and p.requires_grad
+            ]
+        },
+        {
+            "params": [
+                p for n, p in model_without_ddp.named_parameters()
+                if "backbone" in n and p.requires_grad
+            ],
+            "lr":
+                args.lr_backbone,
+        },
+    ]
+    optimizer = torch.optim.AdamW(param_dicts,
+                                  lr=args.lr,
+                                  weight_decay=args.weight_decay)
+
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                   step_size=args.lr_drop,
+                                                   gamma=args.lr_gamma)
+
+    max_batches_per_epoch = int(train_len / args.batch_size)
+    print("Max batches per epoch: {}".format(max_batches_per_epoch))
+
+    resume_checkpoint = False
+    if args.model_load_path:
+        checkpoint = torch.load(args.model_load_path, map_location='cpu')
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+
+        model.to(device)
+
+        if not args.load_weights_only and 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            resume_checkpoint = True
+        elif args.load_weights_only:
+            print("*** WARNING: Resuming training and ignoring optimzer state. "
+                  "Training will resume with new initialized values. "
+                  "To use current optimizer state, remove the --load_weights_only flag.")
+        else:
+            print("*** ERROR: Optimizer state of saved checkpoint not found. "
+                  "To resume training with new initialized values add the --load_weights_only flag.")
+            raise Exception(
+                "ERROR: Optimizer state of saved checkpoint not found. Must add --load_weights_only flag to resume training without.")
+
+        if not args.load_weights_only and 'epoch' in checkpoint:
+            args.start_epoch = checkpoint['epoch'] + 1
+        elif args.load_weights_only:
+            print("*** WARNING: Resuming training and ignoring previously saved epoch. "
+                  "To resume from previously saved epoch, remove the --load_weights_only flag.")
+        else:
+            print("*** WARNING: Epoch of saved model not found. Starting at epoch {}.".format(args.start_epoch))
+
+    # Use user-specified save directory, if specified
+    if args.model_save_dir:
+        output_directory = args.model_save_dir
+    # If resuming from a checkpoint with optimizer state, save into same directory
+    elif args.model_load_path and resume_checkpoint:
+        output_directory = os.path.split(args.model_load_path)[0]
+    # Create new save directory
+    else:
+        run_date = datetime.now().strftime("%Y%m%d%H%M%S")
+        output_directory = os.path.join(args.data_root_dir, "output", run_date)
+
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+    print("Output directory: ", output_directory)
+    model_save_path = os.path.join(output_directory, 'model.pth')
+    print("Output model path: ", model_save_path)
+    if not resume_checkpoint and os.path.exists(model_save_path):
+        print(
+            "*** WARNING: Output model path exists but is not being used to resume training; training will overwrite it.")
+
+    if args.start_epoch >= args.epochs:
+        print("*** WARNING: Starting epoch ({}) is greater or equal to the number of training epochs ({}).".format(
+            args.start_epoch, args.epochs
+        ))
+
+    print("Start training")
+    start_time = datetime.now()
+    for epoch in range(args.start_epoch, args.epochs):
+        print('-' * 100)
+
+        epoch_timing = datetime.now()
+        train_stats = train_one_epoch(
+            model,
+            criterion,
+            data_loader_train,
+            optimizer,
+            device,
+            epoch,
+            args.clip_max_norm,
+            max_batches_per_epoch=max_batches_per_epoch,
+            print_freq=1000)
+        print("Epoch completed in ", datetime.now() - epoch_timing)
+
+        lr_scheduler.step()
+
+        pubmed_stats, coco_evaluator = evaluate(model, criterion,
+                                                postprocessors,
+                                                data_loader_val, dataset_val,
+                                                device, None)
+        print("pubmed: AP50: {:.3f}, AP75: {:.3f}, AP: {:.3f}, AR: {:.3f}".
+              format(pubmed_stats['coco_eval_bbox'][1],
+                     pubmed_stats['coco_eval_bbox'][2],
+                     pubmed_stats['coco_eval_bbox'][0],
+                     pubmed_stats['coco_eval_bbox'][8]))
+
+        # Save current model training progress
+        torch.save({'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    }, model_save_path)
+
+        # Save checkpoint for evaluation
+        if (epoch + 1) % args.checkpoint_freq == 0:
+            model_save_path_epoch = os.path.join(output_directory, 'model_' + str(epoch + 1) + '.pth')
+            torch.save(model.state_dict(), model_save_path_epoch)
+
+    print('Total training time: ', datetime.now() - start_time)
+
+
+def main():
+    cmd_args = get_args().__dict__
+    config_args = json.load(open(cmd_args['config_file'], 'rb'))
+    for key, value in cmd_args.items():
+        if not key in config_args or not value is None:
+            config_args[key] = value
+    # config_args.update(cmd_args)
+    args = type('Args', (object,), config_args)
+    print(args.__dict__)
+    print('-' * 100)
+
+    # Check for debug mode
+    if args.mode == 'eval' and args.debug:
+        print("Running evaluation/inference in DEBUG mode, processing will take longer. Saving output to: {}.".format(
+            args.debug_save_dir))
+        os.makedirs(args.debug_save_dir, exist_ok=True)
 
     # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
@@ -118,131 +360,16 @@ def main(args):
     np.random.seed(seed)
     random.seed(seed)
 
-    model, criterion, postprocessors = build_model(args)
-    model.to(device)
+    print("loading model")
+    device = torch.device(args.device)
+    model, criterion, postprocessors = get_model(args, device)
 
-    model_without_ddp = model
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
-
-    param_dicts = [
-        {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
-        {
-            "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
-            "lr": args.lr_backbone,
-        },
-    ]
-    optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
-                                  weight_decay=args.weight_decay)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
-
-    dataset_train = build_dataset(image_set='train', args=args)
-    dataset_val = build_dataset(image_set='val', args=args)
-
-    if args.distributed:
-        sampler_train = DistributedSampler(dataset_train)
-        sampler_val = DistributedSampler(dataset_val, shuffle=False)
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-
-    batch_sampler_train = torch.utils.data.BatchSampler(
-        sampler_train, args.batch_size, drop_last=True)
-
-    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
-    data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-
-    if args.dataset_file == "coco_panoptic":
-        # We also evaluate AP during panoptic training, on original coco DS
-        coco_val = datasets.coco.build("val", args)
-        base_ds = get_coco_api_from_dataset(coco_val)
-    else:
-        base_ds = get_coco_api_from_dataset(dataset_val)
-
-    if args.frozen_weights is not None:
-        checkpoint = torch.load(args.frozen_weights, map_location='cpu')
-        model_without_ddp.detr.load_state_dict(checkpoint['model'])
-
-    output_dir = Path(args.output_dir)
-    if args.resume:
-        if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            args.start_epoch = checkpoint['epoch'] + 1
-
-    if args.eval:
-        test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
-                                              data_loader_val, base_ds, device, args.output_dir)
-        if args.output_dir:
-            utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
-        return
-
-    print("Start training")
-    start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            sampler_train.set_epoch(epoch)
-        train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm)
-        lr_scheduler.step()
-        if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            # extra checkpoint before LR drop and every 100 epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 100 == 0:
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
-
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
-        )
-
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
-
-        if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
-
-            # for evaluation logs
-            if coco_evaluator is not None:
-                (output_dir / 'eval').mkdir(exist_ok=True)
-                if "bbox" in coco_evaluator.coco_eval:
-                    filenames = ['latest.pth']
-                    if epoch % 50 == 0:
-                        filenames.append(f'{epoch:03}.pth')
-                    for name in filenames:
-                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                   output_dir / "eval" / name)
-
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
+    if args.mode == "train":
+        train(args, model, criterion, postprocessors, device)
+    elif args.mode == "eval":
+        data_loader_test, dataset_test = get_data(args)
+        eval_coco(args, model, criterion, postprocessors, data_loader_test, dataset_test, device)
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
-    args = parser.parse_args()
-    if args.output_dir:
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    main(args)
+if __name__ == "__main__":
+    main()

@@ -23,10 +23,10 @@ from PIL import Image
 
 sys.path.append("../detr")
 import util.misc as utils
-from detr.datasets.coco_eval import CocoEvaluator
-import postprocess
-import grits
-from grits import grits_con, grits_top, grits_loc
+from datasets.coco_eval import CocoEvaluator
+import pipeline.postprocess
+import pipeline.grits
+from pipeline.grits import grits_con, grits_top, grits_loc
 
 
 structure_class_names = [

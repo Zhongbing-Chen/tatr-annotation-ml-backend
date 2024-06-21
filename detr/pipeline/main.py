@@ -5,7 +5,6 @@ import os
 import argparse
 import json
 from datetime import datetime
-import string
 import sys
 import random
 import numpy as np
@@ -16,11 +15,10 @@ sys.path.append("../detr")
 from engine import evaluate, train_one_epoch
 from models import build_model
 import util.misc as utils
-import detr.datasets.transforms as R
 
-import table_datasets as TD
-from table_datasets import PDFTablesDataset
-from eval import eval_coco
+import pipeline.table_datasets as TD
+from pipeline.table_datasets import PDFTablesDataset
+from pipeline.eval import eval_coco
 
 
 def get_args():
